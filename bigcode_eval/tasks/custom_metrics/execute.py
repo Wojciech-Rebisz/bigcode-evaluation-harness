@@ -34,24 +34,33 @@ def check_correctness(check_program, timeout, task_id, completion_id):
     :param completion_id: an optional completion ID so we can match
         the results later even if execution finishes asynchronously.
     """
-    method = "evaluate_code"
-    url = f"http://localhost:5000/{method}"
-    response = requests.post(
-        url,
-        json={"lang": "python", "code": check_program},
-        headers={"Content-Type": "application/json"},
-    )
 
-    details = response.json()[0]
-    if details["stderr"] != "":
-        temp = details["stderr"].split("\n")
-        error_details = "\n".join([temp[-4], temp[-2]])
-    else:
-        error_details = details["stderr"]
+    if url := os.environ.get("WML_URL_ADDR"):
+        return execute_remote_code(
+            url=url,
+            check_program=check_program,
+            task_id=task_id,
+            completion_id=completion_id,
+        )
+
+    manager = multiprocessing.Manager()
+    result = manager.list()
+
+    p = multiprocessing.Process(
+        target=unsafe_execute, args=(check_program, result, timeout)
+    )
+    p.start()
+    p.join(timeout=timeout + 1)
+    if p.is_alive():
+        p.kill()
+
+    if not result:
+        result.append("timed out")
+
     return dict(
         task_id=task_id,
-        passed=details["stderr"] == "",
-        result=error_details,
+        passed=result[0] == "passed",
+        result=result[0],
         completion_id=completion_id,
     )
 
@@ -243,3 +252,26 @@ def reliability_guard(maximum_memory_bytes=None):
     sys.modules["resource"] = None
     sys.modules["psutil"] = None
     sys.modules["tkinter"] = None
+
+
+def execute_remote_code(url, check_program, task_id, completion_id):
+    method = "evaluate_code"
+    url = f"{url}:5000/{method}"
+    response = requests.post(
+        url,
+        json={"lang": "python", "code": check_program},
+        headers={"Content-Type": "application/json"},
+    )
+
+    details = response.json()[0]
+    if details["stderr"] != "":
+        temp = details["stderr"].split("\n")
+        error_details = temp[-2]
+    else:
+        error_details = details["stderr"]
+    return dict(
+        task_id=task_id,
+        passed=details["stderr"] == "",
+        result=error_details,
+        completion_id=completion_id,
+    )
